@@ -38,8 +38,8 @@ struct ReplyBotCooldownEntry {
 };
 
 static constexpr uint8_t REPLYBOT_COOLDOWN_SLOTS = 8;          // ring buffer size
-static constexpr uint32_t REPLYBOT_DM_COOLDOWN_MS = 15 * 1000; // 15 seconds for DMs
-static constexpr uint32_t REPLYBOT_LF_COOLDOWN_MS = 60 * 1000; // 60 seconds for LongFast broadcasts
+static constexpr uint32_t REPLYBOT_DM_COOLDOWN_MS = 1 * 1000; // 15 seconds for DMs
+static constexpr uint32_t REPLYBOT_LF_COOLDOWN_MS = 1 * 1000; // 60 seconds for LongFast broadcasts
 
 static ReplyBotCooldownEntry replybotCooldown[REPLYBOT_COOLDOWN_SLOTS];
 static uint8_t replybotCooldownIdx = 0;
@@ -91,6 +91,11 @@ ProcessMessage ReplyBotModule::handleReceived(const meshtastic_MeshPacket &mp)
     // Accept only direct messages to us or broadcasts on the Primary channel
     // (regardless of modem preset: LongFast, MediumFast, etc).
 
+    // Если led_heartbeat == false, модуль просто игнорирует входящие сообщения
+    if (config.device.led_heartbeat_disabled) {
+        return ProcessMessage::CONTINUE;
+    }
+
     const uint32_t ourNode = nodeDB->getNodeNum();
     const bool isDM = (mp.to == ourNode);
     const bool isPrimaryChannel = (mp.channel == channels.getPrimaryIndex()) && isBroadcast(mp.to);
@@ -111,11 +116,14 @@ ProcessMessage ReplyBotModule::handleReceived(const meshtastic_MeshPacket &mp)
         n = sizeof(buf) - 1;
     memcpy(buf, mp.decoded.payload.bytes, n);
 
+    for (int i = 0; buf[i]; i++) {
+        buf[i] = tolower((unsigned char)buf[i]);
+    }
+
     // React only to supported slash commands
     if (!isCommand(buf)) {
         return ProcessMessage::CONTINUE;
     }
-
     // Apply rate limiting per sender depending on DM/broadcast
     const uint32_t cooldownMs = isDM ? REPLYBOT_DM_COOLDOWN_MS : REPLYBOT_LF_COOLDOWN_MS;
     if (replybotRateLimited(mp.from, cooldownMs)) {
@@ -138,8 +146,13 @@ ProcessMessage ReplyBotModule::handleReceived(const meshtastic_MeshPacket &mp)
 
     // Build the reply message and send it back via DM
     char reply[96];
-    snprintf(reply, sizeof(reply), "🎙️ Mic Check : %d Hops away | RSSI %d | SNR %.1f", hopsAway, rssi, snr);
-    sendDm(mp, reply);
+    //snprintf(reply, sizeof(reply), "🤖 Бoт в прошивкe на связи! : %d xoп(oв) | RSSI %d | SNR %.1f", hopsAway, rssi, snr);
+    if (hopsAway > 0) {
+        snprintf(reply, sizeof(reply), "%d💡", hopsAway);
+    } else {
+        snprintf(reply, sizeof(reply), "%.1f/%d💡", snr, rssi);
+    }
+    sendDm(mp, reply, isDM);
     return ProcessMessage::CONTINUE;
 }
 
@@ -153,31 +166,43 @@ bool ReplyBotModule::isCommand(const char *msg) const
     while (*msg == ' ' || *msg == '\t')
         msg++;
     auto isEndOrSpace = [](char c) { return c == '\0' || std::isspace(static_cast<unsigned char>(c)); };
-    if (strncmp(msg, "/ping", 5) == 0 && isEndOrSpace(msg[5]))
+    if (strncmp(msg, "ping", 5) == 0 && isEndOrSpace(msg[5]))
         return true;
-    if (strncmp(msg, "/hello", 6) == 0 && isEndOrSpace(msg[6]))
+    if (strncmp(msg, "тест", 9) == 0 && isEndOrSpace(msg[9]))
         return true;
-    if (strncmp(msg, "/test", 5) == 0 && isEndOrSpace(msg[5]))
+    if (strncmp(msg, "Тест", 9) == 0 && isEndOrSpace(msg[9]))
+        return true;
+    if (strncmp(msg, "test", 5) == 0 && isEndOrSpace(msg[5]))
+        return true;
+    if (strncmp(msg, "sup", 4) == 0 && isEndOrSpace(msg[5]))
         return true;
     return false;
 }
 
 // Send a direct message back to the originating node.
-void ReplyBotModule::sendDm(const meshtastic_MeshPacket &rx, const char *text)
+void ReplyBotModule::sendDm(const meshtastic_MeshPacket &rx, const char *text, bool isDM)
 {
     if (!text)
         return;
     meshtastic_MeshPacket *p = allocDataPacket();
-    p->to = rx.from;
+    if (isDM) {
+        p->to = rx.from;
+    } else {
+        p->to = NODENUM_BROADCAST;
+    }
     p->channel = rx.channel;
     p->want_ack = false;
     p->decoded.want_response = false;
+    p->decoded.reply_id = rx.id;
+    p->decoded.emoji = true;
     size_t len = strlen(text);
     if (len > sizeof(p->decoded.payload.bytes)) {
         len = sizeof(p->decoded.payload.bytes);
     }
     p->decoded.payload.size = len;
     memcpy(p->decoded.payload.bytes, text, len);
+    LOG_INFO("ReplyBOT: Sent response  msg=%s", p);
     service->sendToMesh(p);
+    //service->sendToPhone(p);
 }
 #endif // MESHTASTIC_EXCLUDE_REPLYBOT

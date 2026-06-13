@@ -14,6 +14,6 @@ class ReplyBotModule : public SinglePortModule
 
   protected:
     bool isCommand(const char *msg) const;
-    void sendDm(const meshtastic_MeshPacket &rx, const char *text);
+    void sendDm(const meshtastic_MeshPacket &rx, const char *text, bool isDM);
 };
 #endif // MESHTASTIC_EXCLUDE_REPLYBOT

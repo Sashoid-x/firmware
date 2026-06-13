@@ -23,8 +23,9 @@ int32_t StatusMessageModule::runOnce()
         p->channel = 0;
         service->sendToMesh(p);
     }
-
-    return 1000 * 12 * 60 * 60;
+    uint32_t intervalSecs = moduleConfig.telemetry.device_update_interval;
+    //return 500 * 1 * 60 * 60;
+    return (intervalSecs * 1000);
 }
 
 ProcessMessage StatusMessageModule::handleReceived(const meshtastic_MeshPacket &mp)
