@@ -22,6 +22,10 @@
 #include <Arduino.h>
 #include <cctype>
 #include <cstring>
+#include "mesh/generated/meshtastic/cannedmessages.pb.h"
+
+// Объявляем доступ к глобальному конфигу из CannedMessageModule.cpp
+extern meshtastic_CannedMessageModuleConfig cannedMessageModuleConfig;
 
 //
 // Rate limiting data structures
@@ -159,6 +163,7 @@ ProcessMessage ReplyBotModule::handleReceived(const meshtastic_MeshPacket &mp)
 // Check if the message starts with one of the supported commands.  Leading
 // whitespace is skipped and commands must be followed by end‑of‑string or
 // whitespace.
+/*
 bool ReplyBotModule::isCommand(const char *msg) const
 {
     if (!msg)
@@ -176,6 +181,41 @@ bool ReplyBotModule::isCommand(const char *msg) const
         return true;
     if (strncmp(msg, "sup", 4) == 0 && isEndOrSpace(msg[5]))
         return true;
+    return false;
+}
+*/
+bool ReplyBotModule::isCommand(const char *msg) const
+{
+    if (!msg)
+        return false;
+        
+    // Пропускаем начальные пробелы
+    while (*msg == ' ' || *msg == '\t')
+        msg++;
+        
+    auto isEndOrSpace = [](char c) { return c == '\0' || std::isspace(static_cast<unsigned char>(c)); };
+
+    // Копируем строку с командами во временный буфер для токенизации
+    char configCopy[sizeof(cannedMessageModuleConfig.messages)];
+    strncpy(configCopy, cannedMessageModuleConfig.messages, sizeof(configCopy) - 1);
+    configCopy[sizeof(configCopy) - 1] = '\0';
+    
+    // Разделяем строку по символу '|'
+    char *token = strtok(configCopy, "|");
+    while (token != NULL) {
+        // Приводим токен к нижнему регистру (входящее сообщение msg уже в нижнем регистре)
+        for (int i = 0; token[i]; i++) {
+            token[i] = tolower((unsigned char)token[i]);
+        }
+        
+        size_t tokenLen = strlen(token);
+        // Проверяем, начинается ли сообщение с текущей команды и идет ли после нее пробел/конец строки
+        if (tokenLen > 0 && strncmp(msg, token, tokenLen) == 0 && isEndOrSpace(msg[tokenLen])) {
+            return true;
+        }
+        token = strtok(NULL, "|");
+    }
+    
     return false;
 }
 
@@ -203,6 +243,5 @@ void ReplyBotModule::sendDm(const meshtastic_MeshPacket &rx, const char *text, b
     memcpy(p->decoded.payload.bytes, text, len);
     LOG_INFO("ReplyBOT: Sent response  msg=%s", p);
     service->sendToMesh(p);
-    //service->sendToPhone(p);
 }
 #endif // MESHTASTIC_EXCLUDE_REPLYBOT
