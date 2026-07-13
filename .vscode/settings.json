@@ -10,9 +10,5 @@
   },
   "[powershell]": {
     "editor.defaultFormatter": "ms-vscode.powershell"
-  },
-  "clangd.arguments": [
-    "--compile-commands-dir=c:/Users/Sash/Documents/111/firmware/.cache/clangd",
-    "--query-driver=C:/Users/Sash/.platformio/packages/toolchain-*/bin/*,C:/Users/Sash/.platformio/packages/tool-*/bin/*"
-  ]
+  }
 }
