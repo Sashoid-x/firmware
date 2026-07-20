@@ -85,7 +85,7 @@ ProcessMessage ReplyBotModule::handleReceived(const meshtastic_MeshPacket &mp)
     const uint32_t ourNode = nodeDB->getNodeNum();
     
     // [ИЗМЕНЕНИЕ 1] Игнорируем сообщения, отправленные самим собой
-    if (mp.from == ourNode) {
+    if (mp.rx_rssi == 0) {
         return ProcessMessage::CONTINUE;
     }
 
