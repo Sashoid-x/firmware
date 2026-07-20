@@ -29,6 +29,7 @@
 
 #include "Default.h"
 #include "MeshRadio.h"
+#include "MessageStore.h"
 #include "RadioInterface.h"
 #include "TypeConversions.h"
 #include "mesh/RadioLibInterface.h"
@@ -537,7 +538,14 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         if (node != NULL) {
             if (nodeDB->setProtectedFlag(node, NODEINFO_BITFIELD_IS_IGNORED_MASK, true)) {
                 nodeDB->eraseNodeSatellites(node->num);
+#if HAS_SCREEN || defined(MESHTASTIC_INCLUDE_NICHE_GRAPHICS)
+                messageStore.deleteAllMessagesFromNode(node->num);
+#endif
                 saveChanges(SEGMENT_NODEDATABASE, false);
+#if HAS_SCREEN
+                if (screen)
+                    screen->setFrames(graphics::Screen::FOCUS_PRESERVE);
+#endif
             } else if (mp.from == 0) { // local request from the phone - tell the user why it didn't take
                 sendWarning(NodeDB::PROTECTED_CAP_WARN_FMT, "ignore", r->set_ignored_node, MAX_NUM_NODES - 2);
             } else {
@@ -786,6 +794,44 @@ void AdminModule::handleSetOwner(const meshtastic_User &o)
     }
 }
 
+#if !defined(ARCH_PORTDUINO) && !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR &&                            \
+    !MESHTASTIC_EXCLUDE_ACCELEROMETER
+// Shared by double-tap-as-button (device) and wake-on-motion (display). Start on either flag's
+// off->on edge; stop on the on->off edge once neither needs it (disable() clears `enabled` so a
+// later re-enable restarts). Skip the stop if the sensor also drives the compass, else the heading
+// freezes until reboot. wasOn/nowOn = old/new of the changed flag; otherFeatureOn = the other flag.
+static void reconcileAccelerometerThread(bool wasOn, bool nowOn, bool otherFeatureOn)
+{
+    if (!accelerometerThread) // null unless a sensor was detected at boot
+        return;
+
+    if (!wasOn && nowOn && accelerometerThread->enabled == false) {
+        accelerometerThread->enabled = true;
+        accelerometerThread->start();
+    } else if (wasOn && !nowOn && !otherFeatureOn && accelerometerThread->enabled == true &&
+               !accelerometerThread->providesHeading()) {
+        accelerometerThread->disable();
+    }
+}
+#endif
+
+// A "regenerate keys" client sends a blank SecurityConfig holding only the new private key, rather than the
+// config it read from us. Detect that shape - new private key, every other field at its proto default - so it
+// isn't mistaken for "and clear everything else".
+static bool isBareKeypairRotation(const meshtastic_Config_SecurityConfig &incoming,
+                                  const meshtastic_Config_SecurityConfig &current)
+{
+    if (incoming.private_key.size != 32)
+        return false;
+    if (current.private_key.size == 32 && memcmp(incoming.private_key.bytes, current.private_key.bytes, 32) == 0)
+        return false;
+
+    return incoming.admin_key_count == 0 && !incoming.is_managed && !incoming.serial_enabled && !incoming.debug_log_api_enabled &&
+           !incoming.admin_channel_enabled &&
+           incoming.packet_signature_policy ==
+               meshtastic_Config_SecurityConfig_PacketSignaturePolicy_PACKET_SIGNATURE_POLICY_COMPATIBLE;
+}
+
 void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
 {
     auto changes = SEGMENT_CONFIG;
@@ -801,12 +847,8 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
         config.has_device = true;
 #if !defined(ARCH_PORTDUINO) && !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR &&                            \
     !MESHTASTIC_EXCLUDE_ACCELEROMETER
-        if (config.device.double_tap_as_button_press == false && c.payload_variant.device.double_tap_as_button_press == true &&
-            accelerometerThread->enabled == false) {
-            config.device.double_tap_as_button_press = c.payload_variant.device.double_tap_as_button_press;
-            accelerometerThread->enabled = true;
-            accelerometerThread->start();
-        }
+        reconcileAccelerometerThread(config.device.double_tap_as_button_press,
+                                     c.payload_variant.device.double_tap_as_button_press, config.display.wake_on_tap_or_motion);
 #endif
         if (config.device.button_gpio == c.payload_variant.device.button_gpio &&
             config.device.buzzer_gpio == c.payload_variant.device.buzzer_gpio &&
@@ -905,12 +947,8 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
         }
 #if !defined(ARCH_PORTDUINO) && !defined(ARCH_STM32WL) && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR &&                            \
     !MESHTASTIC_EXCLUDE_ACCELEROMETER
-        if (config.display.wake_on_tap_or_motion == false && c.payload_variant.display.wake_on_tap_or_motion == true &&
-            accelerometerThread->enabled == false) {
-            config.display.wake_on_tap_or_motion = c.payload_variant.display.wake_on_tap_or_motion;
-            accelerometerThread->enabled = true;
-            accelerometerThread->start();
-        }
+        reconcileAccelerometerThread(config.display.wake_on_tap_or_motion, c.payload_variant.display.wake_on_tap_or_motion,
+                                     config.device.double_tap_as_button_press);
 #endif
         config.display = c.payload_variant.display;
         break;
@@ -1082,6 +1120,16 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
             LOG_WARN("Security set omitted private key; preserving existing identity keypair");
             incoming.private_key = config.security.private_key;
             incoming.public_key = config.security.public_key;
+        }
+        // Rotating the keypair must not drop the admin keys - that locks the owner out of remote admin with no
+        // recourse but a physical connection. Clearing admin keys still works via a SET that leaves the private
+        // key alone and sends an empty list.
+        if (isBareKeypairRotation(incoming, config.security)) {
+            LOG_INFO("Security set is a bare keypair rotation; preserving remaining security config");
+            meshtastic_Config_SecurityConfig rotated = config.security;
+            rotated.public_key = incoming.public_key; // usually empty; derived from the private key below
+            rotated.private_key = incoming.private_key;
+            incoming = rotated;
         }
         config.security = incoming;
 #if !(MESHTASTIC_EXCLUDE_PKI_KEYGEN) && !(MESHTASTIC_EXCLUDE_PKI)
