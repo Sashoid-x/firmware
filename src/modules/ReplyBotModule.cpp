@@ -200,6 +200,8 @@ void ReplyBotModule::sendDm(const meshtastic_MeshPacket &rx, const char *text, b
         return;
 
     meshtastic_MeshPacket *p = allocDataPacket();
+    if (!p)
+        return;
     if (isDM) {
         p->to = rx.from;
     } else {
