@@ -25,6 +25,7 @@
 #include "Power.h"
 #include "SPILock.h"
 #include "Throttle.h"
+#include "WaypointStore.h"
 #include "concurrency/OSThread.h"
 #include "concurrency/Periodic.h"
 #include "detect/ScanI2C.h"
@@ -177,9 +178,9 @@ MagnetometerThread *magnetometerThread = nullptr;
 AudioThread *audioThread = nullptr;
 #endif
 
-#ifdef USE_XL9555
-#include "ExtensionIOXL9555.hpp"
-ExtensionIOXL9555 io;
+#ifdef USE_PCA95X5
+#include PCA95X5_INC
+PCA95X5_CLS io;
 #endif
 
 #ifdef USE_MCP23017
@@ -1095,6 +1096,10 @@ void setup()
     // Now that the mesh service is created, create any modules
     setupModules();
 
+#if !MESHTASTIC_EXCLUDE_WAYPOINT
+    waypointStore.loadFromFlash();
+#endif
+
 #if !MESHTASTIC_EXCLUDE_I2C
     // Inform modules about I2C devices
     ScanI2CCompleted(i2cScanner.get());
@@ -1278,6 +1283,9 @@ void setup()
 uint32_t rebootAtMsec;     // If not zero we will reboot at this time (used to reboot shortly after the update completes)
 uint32_t shutdownAtMsec;   // If not zero we will shutdown at this time (used to shutdown from python or mobile client)
 bool suppressRebootBanner; // If true, suppress "Rebooting..." overlay (used for OTA handoff)
+#ifdef ARCH_STM32
+uint32_t enterDfuAtMsec; // If not zero, enter DFU mode at this millis() deadline (see main.h)
+#endif
 
 #if defined(MESHTASTIC_ENCRYPTED_STORAGE) && defined(MESHTASTIC_PHONEAPI_ACCESS_CONTROL)
 volatile bool lockdownReloadPending;  // see main.h - deferred NodeDB reload after lockdown unlock
@@ -1476,11 +1484,11 @@ void loop()
             RadioLibInterface::instance->pollMissedIrqs();
         }
 
-        // Periodic AGC reset - warm sleep + recalibrate to prevent stuck AGC gain
+        // Periodic radio upkeep - re-arms RX if it was left off, else AGC reset (stuck-gain prevention)
         static uint32_t lastAgcReset;
         if (!Throttle::isWithinTimespanMs(lastAgcReset, AGC_RESET_INTERVAL_MS)) {
             lastAgcReset = millis();
-            RadioLibInterface::instance->resetAGC();
+            RadioLibInterface::instance->periodicRadioMaintenance();
         }
     }
 
@@ -1541,6 +1549,12 @@ void loop()
 #endif
 #if (HAS_SCREEN || defined(MESHTASTIC_INCLUDE_NICHE_GRAPHICS)) && ENABLE_MESSAGE_PERSISTENCE
     messageStoreAutosaveTick();
+#endif
+#if !MESHTASTIC_EXCLUDE_WAYPOINT
+    waypointStore.purgeExpired();
+#endif
+#if !MESHTASTIC_EXCLUDE_WAYPOINT && ENABLE_WAYPOINT_PERSISTENCE
+    waypointStoreAutosaveTick();
 #endif
     long delayMsec = mainController.runOrDelay();
 
