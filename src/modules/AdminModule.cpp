@@ -8,6 +8,7 @@
 #include "PositionPrecision.h"
 #include "PowerFSM.h"
 #include "SPILock.h"
+#include "UptimeClock.h"
 #include "gps/RTC.h"
 #include "input/InputBroker.h"
 #include "meshUtils.h"
@@ -427,13 +428,13 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
 #endif
         int s = 1; // Reboot in 1 second, hard coded
         LOG_INFO("Reboot in %d seconds", s);
-        rebootAtMsec = (s < 0) ? 0 : (millis() + s * 1000);
+        rebootAtMsec = (s < 0) ? 0 : Time::timerEndsAtMillis(s * 1000);
         break;
     }
     case meshtastic_AdminMessage_shutdown_seconds_tag: {
         int32_t s = r->shutdown_seconds;
         LOG_INFO("Shutdown in %d seconds", s);
-        shutdownAtMsec = (s < 0) ? 0 : (millis() + s * 1000);
+        shutdownAtMsec = (s < 0) ? 0 : Time::timerEndsAtMillis(s * 1000);
         break;
     }
     case meshtastic_AdminMessage_get_device_metadata_request_tag: {
@@ -628,10 +629,8 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         // Delay the jump so this ACK reaches the client and it releases the port before the
         // STM32WL ROM bootloader takes the UART and autobauds off the next byte it sees.
         LOG_INFO("Entering DFU in %us - disconnect now", (STM32_DFU_DETACH_DELAY_MS + 999) / 1000);
-        enterDfuAtMsec = millis() + STM32_DFU_DETACH_DELAY_MS;
-        // Guard against enterDfuAtMsec rolling over to 0, the sentinel powerCommandsCheck() reads as unarmed.
-        if (enterDfuAtMsec == 0)
-            enterDfuAtMsec = 1;
+        // timerEndsAtMillis() dodges 0, the sentinel powerCommandsCheck() reads as unarmed.
+        enterDfuAtMsec = Time::timerEndsAtMillis(STM32_DFU_DETACH_DELAY_MS);
 #elif defined(ARCH_NRF52) || defined(ARCH_RP2040)
         enterDfuMode();
 #endif
@@ -1207,10 +1206,20 @@ void AdminModule::handleSetConfig(const meshtastic_Config &c, bool fromOthers)
         config.security = incoming;
 #if !(MESHTASTIC_EXCLUDE_PKI_KEYGEN) && !(MESHTASTIC_EXCLUDE_PKI)
         // First provisioning (no key) generates one; a private key supplied without its public key derives it.
+        // A supplied public key that is itself blacklisted is re-derived too, so a restore carrying a whole
+        // low-entropy pair cannot skip the check just by populating both fields.
         if (config.security.private_key.size != 32) {
             nodeDB->generateCryptoKeyPair();
-        } else if (config.security.public_key.size == 0) {
-            nodeDB->generateCryptoKeyPair(config.security.private_key.bytes);
+        } else if (config.security.public_key.size == 0 || nodeDB->checkLowEntropyPublicKey(config.security.public_key)) {
+            // Warn at set time, not after the next reboot, and only when the key really was replaced: a
+            // blacklisted public key whose private key derives a clean one is re-derived, and that stuck.
+            uint8_t priorPrivateKey[32];
+            memcpy(priorPrivateKey, config.security.private_key.bytes, 32);
+            const bool keygenSucceeded = nodeDB->generateCryptoKeyPair(priorPrivateKey);
+            const bool keyWasReplaced = memcmp(priorPrivateKey, config.security.private_key.bytes, 32) != 0;
+            if (keygenSucceeded && keyWasReplaced && nodeDB->keyIsLowEntropy) {
+                sendWarning(LOW_ENTROPY_RESTORE_WARNING);
+            }
         }
 #endif
         if (config.security.is_managed && !(config.security.admin_key[0].size == 32 || config.security.admin_key[1].size == 32 ||
@@ -1810,10 +1819,6 @@ void AdminModule::handleGetDeviceConnectionStatus(const meshtastic_MeshPacket &r
     if (config.bluetooth.enabled && nrf52Bluetooth) {
         conn.bluetooth.is_connected = nrf52Bluetooth->isConnected();
     }
-#elif defined(ARCH_NRF54L15)
-    if (config.bluetooth.enabled && nrf54l15Bluetooth) {
-        conn.bluetooth.is_connected = nrf54l15Bluetooth->isConnected();
-    }
 #endif
 #endif
     conn.has_serial = true; // No serial-less devices
@@ -1873,7 +1878,7 @@ void AdminModule::reboot(int32_t seconds)
     LOG_INFO("Reboot in %d seconds", seconds);
     if (screen)
         screen->showSimpleBanner("Rebooting...", 0); // stays on screen
-    rebootAtMsec = (seconds < 0) ? 0 : (millis() + seconds * 1000);
+    rebootAtMsec = (seconds < 0) ? 0 : Time::timerEndsAtMillis(seconds * 1000);
 }
 
 // Without this, a commit that never arrives leaves the transaction open forever and every later
@@ -2503,9 +2508,6 @@ void disableBluetooth()
 #elif defined(ARCH_NRF52)
     if (nrf52Bluetooth)
         nrf52Bluetooth->shutdown();
-#elif defined(ARCH_NRF54L15)
-    if (nrf54l15Bluetooth)
-        nrf54l15Bluetooth->shutdown();
 #endif
 #endif
 }
