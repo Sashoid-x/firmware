@@ -8,6 +8,7 @@
 #include "Throttle.h"
 #include "UptimeClock.h"
 #include "gps/RTC.h"
+#include "graphics/PixelArtDecoder.h"
 #include "memory/MemAudit.h"
 #include <cstring> // memcpy
 
@@ -223,7 +224,12 @@ const StoredMessage *MessageStore::tryAddFromPacket(const meshtastic_MeshPacket 
     size_t avail = packet.decoded.payload.size;
     if (avail > MAX_MESSAGE_SIZE - 1)
         avail = MAX_MESSAGE_SIZE - 1;
-    size_t len = strnlen(payload, avail);
+
+    bool isPA = (packet.decoded.portnum == meshtastic_PortNum_PRIVATE_APP &&
+                 PixelArt::isPixelArtPacket(packet.decoded.payload.bytes, avail));
+    sm.isPixelArt = isPA;
+
+    size_t len = isPA ? avail : strnlen(payload, avail);
     sm.textOffset = storeTextInPool(payload, len);
     sm.textLength = len;
 
@@ -263,8 +269,9 @@ struct __attribute__((packed)) StoredMessageRecord {
     uint8_t ackStatus;           // static_cast<uint8_t>(AckStatus)
     uint8_t type;                // static_cast<uint8_t>(MessageType)
     uint8_t xeddsaSigned;        // 1 if packet carried a verified XEdDSA signature
+    uint8_t isPixelArt;          // 1 if packet carried pixel art
     uint16_t textLength;         // message length
-    char text[MAX_MESSAGE_SIZE]; // store actual text here
+    char text[MAX_MESSAGE_SIZE]; // store actual text or payload bytes
 };
 
 // Serialize one StoredMessage to flash
@@ -279,12 +286,20 @@ static inline void writeMessageRecord(SafeFile &f, const StoredMessage &m)
     rec.ackStatus = static_cast<uint8_t>(m.ackStatus);
     rec.type = static_cast<uint8_t>(m.type);
     rec.xeddsaSigned = m.xeddsaSigned ? 1 : 0;
+    rec.isPixelArt = m.isPixelArt ? 1 : 0;
     rec.textLength = m.textLength;
 
-    // Copy the actual text into the record from RAM pool
+    // Copy the actual text or payload into the record from RAM pool
     const char *txt = getTextFromPool(m.textOffset);
-    strncpy(rec.text, txt, MAX_MESSAGE_SIZE - 1);
-    rec.text[MAX_MESSAGE_SIZE - 1] = '\0';
+    if (m.isPixelArt) {
+        size_t copyLen = std::min<size_t>(m.textLength, MAX_MESSAGE_SIZE);
+        memcpy(rec.text, txt, copyLen);
+        if (copyLen < MAX_MESSAGE_SIZE)
+            rec.text[copyLen] = '\0';
+    } else {
+        strncpy(rec.text, txt, MAX_MESSAGE_SIZE - 1);
+        rec.text[MAX_MESSAGE_SIZE - 1] = '\0';
+    }
 
     f.write(reinterpret_cast<const uint8_t *>(&rec), sizeof(rec));
 }
@@ -304,11 +319,18 @@ static inline bool readMessageRecord(File &f, StoredMessage &m)
     m.ackStatus = static_cast<AckStatus>(rec.ackStatus);
     m.type = static_cast<MessageType>(rec.type);
     m.xeddsaSigned = rec.xeddsaSigned != 0;
+    m.isPixelArt = rec.isPixelArt != 0;
     m.textLength = rec.textLength;
 
     // 💡 Re-store text into pool and update offset
-    m.textLength = strnlen(rec.text, MAX_MESSAGE_SIZE - 1);
-    m.textOffset = storeTextInPool(rec.text, m.textLength);
+    if (m.isPixelArt) {
+        if (m.textLength > MAX_MESSAGE_SIZE)
+            m.textLength = MAX_MESSAGE_SIZE;
+        m.textOffset = storeTextInPool(rec.text, m.textLength);
+    } else {
+        m.textLength = strnlen(rec.text, MAX_MESSAGE_SIZE - 1);
+        m.textOffset = storeTextInPool(rec.text, m.textLength);
+    }
 
     return true;
 }
@@ -563,8 +585,23 @@ void MessageStore::upgradeBootRelativeTimestamps()
 
 const char *MessageStore::getText(const StoredMessage &msg)
 {
+    if (msg.isPixelArt) {
+        return "[Pixel Art]";
+    }
     // Wrapper around the internal helper
     return getTextFromPool(msg.textOffset);
+}
+
+const uint8_t *MessageStore::getRawPayload(const StoredMessage &msg)
+{
+    if (msg.textLength == 0 || msg.textOffset + msg.textLength > MESSAGE_TEXT_POOL_SIZE)
+        return nullptr;
+    return reinterpret_cast<const uint8_t *>(getTextFromPool(msg.textOffset));
+}
+
+const uint8_t *MessageStore::getRawPayloadByOffset(uint16_t offset)
+{
+    return reinterpret_cast<const uint8_t *>(getTextFromPool(offset));
 }
 
 uint16_t MessageStore::storeText(const char *src, size_t len)

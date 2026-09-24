@@ -75,11 +75,12 @@ struct StoredMessage {
     uint16_t textLength; // Length of text in bytes
 
     bool xeddsaSigned; // true if packet carried a verified XEdDSA signature
+    bool isPixelArt;   // true if packet payload is pixel art
 
     // Default constructor initializes all fields safely
     StoredMessage()
         : timestamp(0), sender(0), channelIndex(0), dest(0xffffffff), type(MessageType::BROADCAST), isBootRelative(false),
-          ackStatus(AckStatus::NONE), textOffset(0), textLength(0), xeddsaSigned(false)
+          ackStatus(AckStatus::NONE), textOffset(0), textLength(0), xeddsaSigned(false), isPixelArt(false)
     {
     }
 };
@@ -125,6 +126,10 @@ class MessageStore
 
     // Retrieve the C-string text for a stored message
     static const char *getText(const StoredMessage &msg);
+
+    // Retrieve raw payload data for a stored message (e.g. Pixel Art)
+    static const uint8_t *getRawPayload(const StoredMessage &msg);
+    static const uint8_t *getRawPayloadByOffset(uint16_t offset);
 
     // Allocate text into pool (used by sender-side code)
     static uint16_t storeText(const char *src, size_t len);

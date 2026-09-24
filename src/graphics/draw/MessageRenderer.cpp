@@ -13,6 +13,7 @@
 #include "graphics/EmoteRenderer.h"
 #include "graphics/Screen.h"
 #include "graphics/ScreenFonts.h"
+#include "graphics/PixelArtDecoder.h"
 #include "graphics/SharedUIDisplay.h"
 #include "graphics/TFTColorRegions.h"
 #include "graphics/TFTPalette.h"
@@ -261,6 +262,55 @@ static inline int getRenderedLineWidth(OLEDDisplay *display, const std::string &
     return graphics::EmoteRenderer::analyzeLine(display, line, 0, emotes, emoteCount).width;
 }
 
+static inline bool isPixelArtLine(const std::string &line)
+{
+    return line.rfind("\x01PA:", 0) == 0;
+}
+
+static inline bool parsePixelArtLine(const std::string &line, uint16_t &offset, uint16_t &length)
+{
+    if (!isPixelArtLine(line))
+        return false;
+    unsigned int off = 0, len = 0;
+    if (sscanf(line.c_str() + 4, "%u:%u", &off, &len) == 2) {
+        offset = static_cast<uint16_t>(off);
+        length = static_cast<uint16_t>(len);
+        return true;
+    }
+    return false;
+}
+
+static inline void getPixelArtDimensions(const std::string &line, int &width, int &height)
+{
+    width = 39;
+    height = 40;
+    uint16_t offset = 0, length = 0;
+    if (parsePixelArtLine(line, offset, length)) {
+        const uint8_t *data = MessageStore::getRawPayloadByOffset(offset);
+        if (data && length >= 1) {
+            uint8_t presetIdx = data[0] & 0x0F;
+            if (presetIdx < 10) {
+                width = PixelArt::PRESETS[presetIdx].width;
+                height = PixelArt::PRESETS[presetIdx].height;
+            }
+        }
+    }
+}
+
+static inline int getPixelArtWidth(const std::string &line)
+{
+    int w = 0, h = 0;
+    getPixelArtDimensions(line, w, h);
+    return w;
+}
+
+static inline int getPixelArtHeight(const std::string &line)
+{
+    int w = 0, h = 0;
+    getPixelArtDimensions(line, w, h);
+    return h;
+}
+
 struct MessageBlock {
     size_t start;
     size_t end;
@@ -341,6 +391,9 @@ static int getDrawnLinePixelBottom(int lineTopY, const std::string &line, bool i
 {
     if (isHeaderLine) {
         return lineTopY + (FONT_HEIGHT_SMALL - 1);
+    }
+    if (isPixelArtLine(line)) {
+        return lineTopY + getPixelArtHeight(line) - 1;
     }
 
     const int tallest = graphics::EmoteRenderer::analyzeLine(nullptr, line, FONT_HEIGHT_SMALL, emotes, numEmotes).tallestHeight;
@@ -707,22 +760,31 @@ void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16
             ackForLine.push_back(m.ackStatus);
         }
 
-        const char *msgText = MessageStore::getText(m);
-
-        int wrapWidth = mine ? rightTextWidth : leftTextWidth;
-        std::vector<std::string> wrapped = generateLines(display, "", msgText, wrapWidth);
-        // Per-message wrap-line limit: even if wrapping produces many lines, cap them to prevent
-        // a single long message from consuming most or all of the cache.
-        constexpr size_t MAX_WRAPPED_LINES_PER_MSG = 20U;
-        size_t wrappedCount = 0;
-        for (auto &ln : wrapped) {
-            if (allLines.size() >= MAX_CACHED_LINES || wrappedCount >= MAX_WRAPPED_LINES_PER_MSG)
-                break; // Cache limit or per-message limit reached; stop adding lines from this message
-            allLines.emplace_back(std::move(ln));
+        if (m.isPixelArt) {
+            char paMarker[32];
+            snprintf(paMarker, sizeof(paMarker), "\x01PA:%u:%u", m.textOffset, m.textLength);
+            allLines.emplace_back(paMarker);
             isMine.push_back(mine);
             isHeader.push_back(false);
             ackForLine.push_back(AckStatus::NONE);
-            ++wrappedCount;
+        } else {
+            const char *msgText = MessageStore::getText(m);
+
+            int wrapWidth = mine ? rightTextWidth : leftTextWidth;
+            std::vector<std::string> wrapped = generateLines(display, "", msgText, wrapWidth);
+            // Per-message wrap-line limit: even if wrapping produces many lines, cap them to prevent
+            // a single long message from consuming most or all of the cache.
+            constexpr size_t MAX_WRAPPED_LINES_PER_MSG = 20U;
+            size_t wrappedCount = 0;
+            for (auto &ln : wrapped) {
+                if (allLines.size() >= MAX_CACHED_LINES || wrappedCount >= MAX_WRAPPED_LINES_PER_MSG)
+                    break; // Cache limit or per-message limit reached; stop adding lines from this message
+                allLines.emplace_back(std::move(ln));
+                isMine.push_back(mine);
+                isHeader.push_back(false);
+                ackForLine.push_back(AckStatus::NONE);
+                ++wrappedCount;
+            }
         }
     }
 
@@ -822,6 +884,7 @@ void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16
             } else {
                 // Body start
                 const bool thisLineHasEmote =
+                    !isPixelArtLine(cachedLines[b.start]) &&
                     graphics::EmoteRenderer::analyzeLine(nullptr, cachedLines[b.start].c_str(), 0, emotes, numEmotes).hasEmote;
                 if (thisLineHasEmote) {
                     constexpr int EMOTE_PADDING_ABOVE = 4;
@@ -861,7 +924,9 @@ void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16
 
             for (size_t i = b.start; i <= b.end; ++i) {
                 int w = 0;
-                if (isHeader[i]) {
+                if (isPixelArtLine(cachedLines[i])) {
+                    w = getPixelArtWidth(cachedLines[i]);
+                } else if (isHeader[i]) {
                     w = graphics::UIRenderer::measureStringWithEmotes(display, cachedLines[i].c_str());
                     if (b.mine)
                         w += 12; // room for ACK/NACK/relay mark
@@ -996,6 +1061,51 @@ void drawTextMessageFrame(OLEDDisplay *display, OLEDDisplayUiState *state, int16
                     // AckStatus::NONE → show nothing
                 }
 
+            } else if (isPixelArtLine(cachedLines[i])) {
+                uint16_t offset = 0, length = 0;
+                if (parsePixelArtLine(cachedLines[i], offset, length)) {
+                    const uint8_t *payload = MessageStore::getRawPayloadByOffset(offset);
+                    if (payload && length >= 2) {
+                        static PixelArt::DecodedImage img;
+                        if (PixelArt::Decoder::decode(payload, length, &img)) {
+                            int imgX = 0;
+                            if (isMine[i]) {
+                                int rightX = (SCREEN_WIDTH - SCROLLBAR_WIDTH - RIGHT_MARGIN) - img.width -
+                                             (showBubbles ? textIndent : 0);
+                                if (rightX < LEFT_MARGIN)
+                                    rightX = LEFT_MARGIN;
+                                imgX = rightX;
+                            } else {
+                                imgX = contentLeft + textIndent;
+                            }
+
+                            // Render pixels 1:1
+                            display->setColor(WHITE);
+                            for (int py = 0; py < img.height; py++) {
+                                int curY = lineY + py;
+                                if (curY < contentTop || curY >= scrollBottom)
+                                    continue;
+                                for (int px = 0; px < img.width; px++) {
+                                    if (img.pixels[py * img.width + px]) {
+                                        display->setPixel(imgX + px, curY);
+                                    }
+                                }
+                            }
+
+#if GRAPHICS_TFT_COLORING_ENABLED
+                            if (isTFTColoringEnabled()) {
+                                const auto &theme = PixelArt::THEMES[img.themeIndex];
+                                int clipTop = std::max<int>(lineY, contentTop);
+                                int clipBottom = std::min<int>(lineY + img.height, scrollBottom);
+                                if (clipBottom > clipTop) {
+                                    registerTFTColorRegionDirect(imgX, clipTop, img.width, clipBottom - clipTop,
+                                                                 theme.fg_565, theme.bg_565);
+                                }
+                            }
+#endif
+                        }
+                    }
+                }
             } else {
                 // Render message line
                 if (isMine[i]) {
@@ -1100,6 +1210,12 @@ std::vector<int> calculateLineHeights(const std::vector<std::string> &lines, con
         if (isHeaderVec[idx]) {
             // Header line spacing
             lineHeight = baseHeight + HEADER_UNDERLINE_PIX + HEADER_UNDERLINE_GAP;
+        } else if (isPixelArtLine(lines[idx])) {
+            int imgH = getPixelArtHeight(lines[idx]);
+            lineHeight = imgH + 2;
+            if (idx + 1 < lines.size() && isHeaderVec[idx + 1]) {
+                lineHeight += MESSAGE_BLOCK_GAP;
+            }
         } else {
             // Base spacing for normal lines
             int desiredBody = baseHeight + BODY_LINE_LEADING;
@@ -1176,12 +1292,13 @@ void handleNewMessage(OLEDDisplay *display, const StoredMessage &sm, const mesht
 
             if (truncatedLongName[0]) {
                 if (currentResolution == ScreenResolution::UltraLow) {
-                    strcpy(banner, "New Message");
+                    strcpy(banner, sm.isPixelArt ? "Pixel Art" : "New Message");
                 } else {
-                    snprintf(banner, sizeof(banner), "New Message from\n%s", truncatedLongName);
+                    snprintf(banner, sizeof(banner), sm.isPixelArt ? "Pixel Art from\n%s" : "New Message from\n%s",
+                             truncatedLongName);
                 }
             } else
-                strcpy(banner, "New Message");
+                strcpy(banner, sm.isPixelArt ? "Pixel Art" : "New Message");
         }
 
         // Append context (which channel or DM) so the banner shows where the message arrived

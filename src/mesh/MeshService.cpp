@@ -16,6 +16,7 @@
 #include "gps/GPSLog.h"
 #include "gps/RTC.h"
 #include "graphics/draw/MessageRenderer.h"
+#include "graphics/PixelArtDecoder.h"
 #include "main.h"
 #include "mesh-pb-constants.h"
 #include "meshUtils.h"
@@ -315,7 +316,10 @@ void MeshService::handleToRadio(meshtastic_MeshPacket &p)
     // Record the time the packet arrived from the phone.
     stampRxTime(&p);
 
-    IF_SCREEN(if (p.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP && p.decoded.payload.size > 0 &&
+    IF_SCREEN(if ((p.decoded.portnum == meshtastic_PortNum_TEXT_MESSAGE_APP ||
+                   (p.decoded.portnum == meshtastic_PortNum_PRIVATE_APP &&
+                    PixelArt::isPixelArtPacket(p.decoded.payload.bytes, p.decoded.payload.size))) &&
+                  p.decoded.payload.size > 0 &&
                   p.to != NODENUM_BROADCAST && p.to != 0) // DM only
               {
                   perhapsDecode(&p);
