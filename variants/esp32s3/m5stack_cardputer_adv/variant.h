@@ -23,7 +23,7 @@
 
 // Backlight is controlled to power rail on this board, this also powers the neopixel
 // #define PIN_POWER_EN 38
-
+#define BASEUI_HAS_GAMES 1
 #define BUTTON_PIN 0
 
 #define I2C_SDA 8
