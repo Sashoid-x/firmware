@@ -15,6 +15,30 @@ on:
     secrets:
       MEMBROWSE_API_KEY:
         required: false
+  workflow_dispatch:
+    inputs:
+      pio_env:
+        description: "PlatformIO environment (e.g. heltec-v3, rak4631, tbeam)"
+        required: true
+        type: string
+      platform:
+        description: "Platform architecture"
+        required: true
+        type: choice
+        options:
+          - esp32
+          - esp32s3
+          - esp32c3
+          - esp32c6
+          - nrf52840
+          - rp2040
+          - rp2350
+          - stm32
+      version:
+        description: "Firmware version string"
+        required: false
+        type: string
+        default: "local"
 
 permissions: read-all
 
